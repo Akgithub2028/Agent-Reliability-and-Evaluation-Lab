@@ -1,6 +1,8 @@
+<div align="center">
+
 # AREL — Agent Reliability & Evaluation Lab
 
-> A production-oriented reliability, benchmarking and evaluation system built around an MCP agent runtime.
+**A production-oriented reliability, benchmarking and evaluation system built around an MCP agent runtime.**
 
 <p>
   <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white"></a>
@@ -16,6 +18,12 @@
   <a href="https://mcp.modelcontextprotocol.io/"><img alt="MCP" src="https://img.shields.io/badge/MCP-1.0%E2%86%922.1-4A4A4A.svg"></a>
   <a href="https://a2a-protocol.org/"><img alt="A2A" src="https://img.shields.io/badge/A2A-v0.3-6C4AB6.svg"></a>
 </p>
+
+<p>
+  <sub>8 additive subsystems &middot; 3 155 LOC source &middot; 109 new tests &middot; 82 % coverage &middot; 470 k msg/s adaptive streaming</sub>
+</p>
+
+</div>
 
 ---
 
@@ -62,6 +70,382 @@ Architecture
 ```
 
 Each branch above is realised by a concrete module under `src/mcp_agent/enhancements/` and is exercised by the test suite under `tests/enhancements/`. The branches are **not** marketing copy — they map 1:1 to files, classes and measurable numbers (see **Measured results** below).
+
+---
+
+## System architecture
+
+The diagram below shows how AREL sits on top of the upstream MCP agent runtime. The upstream `mcp_agent.*` package (left, in grey) provides composition primitives; the new `mcp_agent.enhancements.*` package (right, in colour) provides the reliability, benchmarking and evaluation platform. The two are wired together by the `HybridMCPA2AGateway` and the `ResilientExecutor` — everything else is additive and can be adopted incrementally.
+
+```mermaid
+flowchart LR
+    subgraph UP["Upstream mcp_agent runtime (Apache-2.0, unchanged)"]
+        direction TB
+        APP["MCPApp<br/>context & lifecycle"]
+        AGENT["Agent + AgentSpec"]
+        LLM["AugmentedLLM<br/>(OpenAI/Anthropic/Bedrock/…)"]
+        WF["Workflows<br/>orchestrator · router · parallel · swarm"]
+        MCP["MCP client<br/>stdio + HTTP transports"]
+        TRACE["OpenTelemetry tracing"]
+        LOG["Rich structured logging"]
+    end
+
+    subgraph ENH["AREL enhancements package (this project)"]
+        direction TB
+        P1A["P1.1 Protocol<br/>MCPProtocolAdapter"]
+        P1B["P1.2 A2A<br/>AgentCard · A2AClient<br/>HybridMCPA2AGateway"]
+        P2A["P2.1 Streaming<br/>AdaptiveStreamProcessor<br/>StreamingMultiplexer"]
+        P2B["P2.2 Connection<br/>MCPConnectionPool<br/>CircuitBreaker · QuotaManager"]
+        P3A["P3.1 Plugin<br/>PluginManager<br/>(hot-reload)"]
+        P3B["P3.2 Patterns<br/>WorkflowPatternRegistry<br/>PatternComposer"]
+        P4A["P4.1 Resilience<br/>ResilientExecutor<br/>RetryPolicy · FallbackChain<br/>StateRecovery"]
+        P4B["P4.2 Health<br/>HealthMonitor<br/>HealthCheck · AutoScaler"]
+    end
+
+    subgraph EXT["External surfaces"]
+        direction TB
+        PEER["A2A peer agents"]
+        LLM_API["LLM provider APIs"]
+        MCP_SRV["MCP servers"]
+        USER["Operator / SRE"]
+    end
+
+    APP --> AGENT --> LLM
+    AGENT --> WF
+    WF --> MCP
+    MCP --> MCP_SRV
+    LLM --> LLM_API
+
+    P1A -. negotiates .-> MCP
+    P1B -. bridges .-> MCP
+    P1B <--> PEER
+    P2A -. wraps streams .-> WF
+    P2B -. pools .-> MCP
+    P2B -. guards .-> LLM
+    P3A -. injects into .-> APP
+    P3B -. extends .-> WF
+    P4A -. wraps .-> WF
+    P4A -. wraps .-> P1B
+    P4B -. observes .-> P2B
+    P4B -. observes .-> P2A
+    P4B -. emits signals .-> USER
+
+    TRACE -. consumes .-> ENH
+    LOG -. consumes .-> ENH
+
+    classDef upstream fill:#F5F5F5,stroke:#999999,color:#333333
+    classDef enh fill:#EEF2FF,stroke:#425CC7,color:#1E1B4B
+    classDef ext fill:#FEF3C7,stroke:#D97706,color:#78350F
+
+    class APP,AGENT,LLM,WF,MCP,TRACE,LOG upstream
+    class P1A,P1B,P2A,P2B,P3A,P3B,P4A,P4B enh
+    class PEER,LLM_API,MCP_SRV,USER ext
+```
+
+### Layered view
+
+The four P-tier groups form a layered cake. P1 is the protocol foundation; P2 is the transport and resource layer; P3 is the extensibility layer; P4 is the resilience & operations layer that observes and protects everything below.
+
+```mermaid
+flowchart TB
+    subgraph L4["P4 — Resilience & Operations"]
+        HM["HealthMonitor + AutoScaler<br/>(EWMA · predictive)"]
+        RE["ResilientExecutor<br/>(retry · fallback · state recovery)"]
+    end
+
+    subgraph L3["P3 — Extensibility"]
+        PM["PluginManager<br/>(hot-reload)"]
+        PR["WorkflowPatternRegistry<br/>+ PatternComposer"]
+    end
+
+    subgraph L2["P2 — Transport & Resources"]
+        ASP["AdaptiveStreamProcessor<br/>(3 QoS tiers · backpressure)"]
+        CP["MCPConnectionPool<br/>+ CircuitBreaker + QuotaManager"]
+    end
+
+    subgraph L1["P1 — Protocol"]
+        PA["MCPProtocolAdapter<br/>(5 versions · deprecation)"]
+        A2A["A2A Gateway<br/>(discovery · task lifecycle)"]
+    end
+
+    subgraph L0["Foundation"]
+        RUNTIME["Upstream MCP agent runtime<br/>(MCPApp · Agent · AugmentedLLM · Workflows)"]
+    end
+
+    L4 --> L3 --> L2 --> L1 --> L0
+
+    HM -. observes .-> CP
+    HM -. observes .-> ASP
+    RE -. wraps .-> A2A
+    RE -. wraps .-> CP
+    PM -. injects .-> RUNTIME
+    PR -. extends .-> RUNTIME
+
+    classDef l0 fill:#F5F5F5,stroke:#999999,color:#333333
+    classDef l1 fill:#E0E7FF,stroke:#425CC7,color:#1E1B4B
+    classDef l2 fill:#C7D2FE,stroke:#425CC7,color:#1E1B4B
+    classDef l3 fill:#A5B4FC,stroke:#425CC7,color:#1E3A8A
+    classDef l4 fill:#818CF8,stroke:#312E81,color:#FFFFFF
+
+    class RUNTIME l0
+    class PA,A2A l1
+    class ASP,CP l2
+    class PM,PR l3
+    class HM,RE l4
+```
+
+---
+
+## Workflow diagrams
+
+### Request lifecycle through the resilient executor
+
+A typical agent request flows through the protocol adapter (negotiate version), the connection pool (acquire a pooled connection), the resilient executor (retry on failure, fall back to an A2A peer if needed), the adaptive stream processor (consume the LLM stream with QoS), and the health monitor (record latency & error rate). State snapshots are saved between steps so a retry can resume mid-flight instead of redoing completed work.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller as Caller
+    participant PA as MCPProtocolAdapter
+    participant CP as MCPConnectionPool
+    participant CB as CircuitBreaker
+    participant RE as ResilientExecutor
+    participant SR as StateRecovery
+    participant LLM as AugmentedLLM
+    participant ASP as AdaptiveStreamProcessor
+    participant HM as HealthMonitor
+    participant AS as AutoScaler
+
+    Caller->>PA: negotiate(version)
+    PA-->>Caller: NegotiatedCapabilities
+
+    Caller->>RE: execute_with_resilience(fn, workflow_id)
+    RE->>SR: load(workflow_id)
+    alt snapshot exists
+        SR-->>RE: snapshot(step=N)
+        RE->>RE: resume from step N
+    else no snapshot
+        RE->>RE: start from step 0
+    end
+
+    RE->>CP: acquire(target)
+    CP->>CB: before_call()
+    alt breaker OPEN
+        CB-->>CP: false (fast-fail)
+        CP-->>RE: CircuitBreakerOpenError
+        RE->>RE: fallback chain
+    else breaker CLOSED / HALF_OPEN
+        CB-->>CP: true
+        CP-->>RE: connection
+        RE->>LLM: generate_stream(prompt)
+        loop over tokens
+            LLM-->>ASP: token (QoS=BEST_EFFORT)
+            ASP-->>Caller: token
+        end
+        RE->>CP: release(connection)
+        CP->>CB: record_success()
+        RE->>SR: save(workflow_id, step, state)
+    end
+
+    par health observation
+        ASP->>HM: latency + error_rate
+        LLM->>HM: latency + error_rate
+        HM->>HM: EWMA update
+        alt status transition
+            HM->>AS: on_unhealthy / on_recovered
+            AS-->>Caller: ScaleSignal (UP / DOWN)
+        end
+    end
+
+    RE-->>Caller: result / ExecutionStats
+```
+
+### A2A gateway: bridging peer agents into MCP
+
+`HybridMCPA2AGateway` makes remote A2A agents appear as local MCP tools (named `a2a__<agent_name>`). The gateway handles agent discovery (via `/.well-known/agent.json`), task lifecycle (`submitted → working → input-required → completed/canceled/failed`), and transport selection (HTTP for production, in-proc for tests).
+
+```mermaid
+flowchart TB
+    subgraph CLIENT["MCP client"]
+        CALL["call_tool('a2a__researcher', input)"]
+    end
+
+    subgraph GW["HybridMCPA2AGateway"]
+        LT["list_tools()"]
+        DISP["dispatch(name, input)"]
+        REG["registry:<br/>name → A2AClient"]
+    end
+
+    subgraph A2A_PEER_A["A2A peer: researcher"]
+        AC1["AgentCard<br/>/.well-known/agent.json"]
+        TS1["A2AServer<br/>task lifecycle"]
+    end
+
+    subgraph A2A_PEER_B["A2A peer: coder"]
+        AC2["AgentCard"]
+        TS2["A2AServer"]
+    end
+
+    subgraph TRANSP["Transport"]
+        HTTP["httpx<br/>(production)"]
+        INPROC["in-proc<br/>(tests)"]
+    end
+
+    CALL --> DISP
+    LT --> DISP
+    DISP --> REG
+    REG -- "researcher" --> AC1
+    REG -- "coder" --> AC2
+    AC1 --> TS1
+    AC2 --> TS2
+    TS1 --> HTTP
+    TS2 --> HTTP
+    TS1 -. test .-> INPROC
+    TS2 -. test .-> INPROC
+
+    classDef client fill:#FEF3C7,stroke:#D97706,color:#78350F
+    classDef gw fill:#EEF2FF,stroke:#425CC7,color:#1E1B4B
+    classDef peer fill:#FCE7F3,stroke:#BE185D,color:#831843
+    classDef trans fill:#D1FAE5,stroke:#059669,color:#064E3B
+
+    class CALL client
+    class LT,DISP,REG gw
+    class AC1,TS1,AC2,TS2 peer
+    class HTTP,INPROC trans
+```
+
+### Circuit breaker state machine
+
+Three states, exponential backoff on recovery trips, `on_trip` async callback for the health monitor.
+
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+
+    CLOSED --> OPEN: failures ≥ failure_threshold
+    OPEN --> HALF_OPEN: open_timeout_s elapsed
+    HALF_OPEN --> CLOSED: success ≥ success_threshold
+    HALF_OPEN --> OPEN: any failure
+
+    note right of OPEN
+        Fast-fail all calls.
+        Backoff = base_s × 2^(trips-1)
+        capped at backoff_max_s.
+        Fires on_trip callback.
+    end note
+
+    note right of HALF_OPEN
+        Allow probe requests.
+        Reset backoff if recovery
+        succeeds.
+    end note
+```
+
+### Adaptive streaming: QoS & backpressure
+
+`AdaptiveStreamProcessor` is a bounded queue with three QoS tiers. When the queue is full, the per-tier policy decides whether to drop, block, or propagate backpressure to the autoscaler.
+
+```mermaid
+flowchart TB
+    subgraph PROD["Producer"]
+        P1["emit(item, qos)"]
+    end
+
+    subgraph Q["AdaptiveStreamProcessor (bounded queue)"]
+        DECIDE{"queue full?"}
+        T1["DROPPABLE<br/>priority=1"]
+        T2["BEST_EFFORT<br/>priority=5"]
+        T3["REALTIME<br/>priority=10"]
+        BUF["bounded buffer<br/>(maxsize)"]
+    end
+
+    subgraph CONS["Consumer"]
+        C1["async for item in proc.process()"]
+    end
+
+    subgraph REACT["Reactive hooks"]
+        DROP["drop oldest<br/>++dropped"]
+        BLOCK["block producer<br/>++backpressure_events"]
+        SCALE["on_backpressure()<br/>→ AutoScaler.SCALE_UP"]
+    end
+
+    P1 --> DECIDE
+    DECIDE -- yes --> T1
+    DECIDE -- yes --> T2
+    DECIDE -- yes --> T3
+    DECIDE -- no --> BUF
+
+    T1 --> DROP
+    T2 --> BLOCK
+    T3 --> SCALE
+
+    DROP --> BUF
+    BLOCK --> BUF
+    SCALE --> BUF
+
+    BUF --> C1
+
+    classDef prod fill:#FEF3C7,stroke:#D97706,color:#78350F
+    classDef q fill:#EEF2FF,stroke:#425CC7,color:#1E1B4B
+    classDef cons fill:#D1FAE5,stroke:#059669,color:#064E3B
+    classDef react fill:#FEE2E2,stroke:#DC2626,color:#7F1D1D
+
+    class P1 prod
+    class DECIDE,T1,T2,T3,BUF q
+    class C1 cons
+    class DROP,BLOCK,SCALE react
+```
+
+### Health monitor & autoscaler feedback loop
+
+The health monitor runs registered checks on a schedule, computes EWMA latency and EWMA error rate over the last 20 invocations, and fires `on_unhealthy` / `on_recovered` callbacks **on transitions only** (not on every check) to avoid alert storms. The autoscaler subscribes to those transitions and emits `SCALE_UP` / `SCALE_DOWN` signals with per-component cooldowns.
+
+```mermaid
+flowchart LR
+    subgraph TARGETS["Observed components"]
+        DB["db"]
+        CACHE["cache"]
+        LLM_API["LLM API"]
+        MCP_SRV["MCP server"]
+    end
+
+    subgraph MON["HealthMonitor"]
+        SCHED["schedule loop"]
+        EWMA["EWMA latency<br/>EWMA error_rate<br/>(window=20)"]
+        STATE["status per component<br/>HEALTHY / DEGRADED /<br/>UNHEALTHY / UNKNOWN"]
+        CB_ON["on_unhealthy<br/>(transition only)"]
+        CB_OFF["on_recovered<br/>(transition only)"]
+    end
+
+    subgraph SCALE["AutoScaler"]
+        DECIDE{"transition?"}
+        UP["SCALE_UP<br/>(UNHEALTHY)"]
+        DOWN["SCALE_DOWN<br/>(HEALTHY + cooldown)"]
+        HOLD["HOLD"]
+    end
+
+    TARGETS --> SCHED
+    SCHED --> EWMA
+    EWMA --> STATE
+    STATE -- degraded --> CB_ON
+    STATE -- healthy --> CB_OFF
+    CB_ON --> DECIDE
+    CB_OFF --> DECIDE
+    DECIDE -- unhealthy --> UP
+    DECIDE -- healthy + cooldown ok --> DOWN
+    DECIDE -- otherwise --> HOLD
+
+    UP -. feeds .-> TARGETS
+    DOWN -. feeds .-> TARGETS
+
+    classDef targets fill:#FEF3C7,stroke:#D97706,color:#78350F
+    classDef mon fill:#EEF2FF,stroke:#425CC7,color:#1E1B4B
+    classDef scale fill:#FCE7F3,stroke:#BE185D,color:#831843
+
+    class DB,CACHE,LLM_API,MCP_SRV targets
+    class SCHED,EWMA,STATE,CB_ON,CB_OFF mon
+    class DECIDE,UP,DOWN,HOLD scale
+```
 
 ---
 
@@ -520,3 +904,4 @@ The upstream `lastmile-ai/mcp-agent` source remains under its original Apache-2.
 ## License
 
 Licensed under the Apache License, Version 2.0 — see [`LICENSE`](./LICENSE) for the full text. Third-party attributions are listed in [`NOTICE`](./NOTICE).
+
