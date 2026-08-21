@@ -174,7 +174,6 @@ examples/mcp/mcp_roots/test_data/*.png
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
-uv.lock
 
 # File generated from promptify script (to create an LLM-friendly prompt for the repo)
 prompt.md
